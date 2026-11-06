@@ -1,0 +1,26 @@
+# 대회 데이터와 산출물은 올리지 않음 (데이콘 규정 + 용량)
+data/
+output/
+*.csv
+*.zip
+*.pkl
+*.joblib
+
+# 비밀 정보
+.env
+.env.*
+
+# 데이콘 제공 베이스라인 (비교용, 재배포 안 함)
+baseline_dacon.ipynb
+
+# 환경·캐시
+.ipynb_checkpoints/
+__pycache__/
+.venv/
+venv/
+.DS_Store
+.vscode/
+.idea/
+
+# 노트북은 정리 후 올릴 예정
+01_baseline.ipynb
