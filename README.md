@@ -15,7 +15,8 @@
 cancer-subtype/
 ├── (노트북 추가 예정)
 ├── docs/
-│   └── data_leakage.md # Data Leakage 규칙과 우리 코드 점검 결과
+│   ├── data_leakage.md # Data Leakage 규칙과 우리 코드 점검 결과
+│   └── research.md     # 영역별 자료 조사 (논문, 적용 아이디어)
 ├── requirements.txt
 ├── data/               # 대회 데이터 (git에 올리지 않음)
 └── output/             # 제출 파일, 모델 (git에 올리지 않음)
