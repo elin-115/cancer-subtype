@@ -14,11 +14,9 @@
 ```
 cancer-subtype/
 ├── (노트북 추가 예정)
-├── docs/
-│   ├── data_leakage.md # Data Leakage 규칙과 우리 코드 점검 결과
-│   ├── research.md     # 영역별 자료 조사 (논문, 적용 아이디어)
-│   ├── research_*.md   # 팀원별 자료 원본
-│   └── review_checklist.md # 자료 검토 메모 (논의 후 반영)
+├── docs/               # 문서 목록과 설명: docs/README.md
+│   ├── 0x_*.md         # 팀 공통 (데이터 누수 규칙, 자료 조사 종합, 검토 체크리스트)
+│   └── 10~52_*.md      # 영역별 자료 원본 (번호 = 자료 조사 영역 ①②⑤, 이름 = 작성자)
 ├── requirements.txt
 ├── data/               # 대회 데이터 (git에 올리지 않음)
 └── output/             # 제출 파일, 모델 (git에 올리지 않음)
@@ -43,5 +41,5 @@ cancer-subtype/
 macOS 15.7 (arm64), Python 3.14.6
 
 ## 규칙
-- 전처리 기준(인코더, 통계, 피처 선택)은 train에서만 만들고, test에는 적용만 합니다. 자세한 내용은 [docs/data_leakage.md](docs/data_leakage.md)를 참고합니다.
+- 전처리 기준(인코더, 통계, 피처 선택)은 train에서만 만들고, test에는 적용만 합니다. 자세한 내용은 [docs/01_데이터누수_규칙.md](docs/01_데이터누수_규칙.md)를 참고합니다.
 - 대회 데이터와 API 키, 비밀번호는 올리지 않습니다.
