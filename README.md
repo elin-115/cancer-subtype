@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/oncova_banner.png" alt="ONCOVA - 암환자 유전체 데이터의 변이 정보를 활용한 암종 분류 AI 모델 개발" width="100%">
+</p>
+
 # OZ 코딩스쿨 × 데이콘 해커톤 (2026.11.06 ~ 11.13)
 
 유전자 변이 정보로 암 아형(SUBCLASS, 26종)을 분류하는 프로젝트입니다.
@@ -14,6 +18,7 @@
 ```
 cancer-subtype/
 ├── (노트북 추가 예정)
+├── assets/             # README 배너 등 이미지
 ├── docs/               # 문서 목록과 설명: docs/README.md
 │   ├── 0x_*.md         # 팀 공통 (데이터 누수 규칙, 자료 조사 종합, 검토 체크리스트)
 │   └── N_M_*.md        # 영역별 자료 (N = 영역 ①~⑥, M = 0 종합 / 1~ 개별 자료)
