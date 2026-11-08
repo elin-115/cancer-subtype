@@ -259,6 +259,7 @@ train 데이터만 봤습니다. test는 보지 않았습니다.
 
 - 시장성 조사 (여은지): [research_5_market.md](./research_5_market.md)
 - 사용자 조사 (여은지): [research_5_user.md](./research_5_user.md)
+- 보완: 출처 확인·국내 시장·모델 실측·CUP 사용 시나리오·피드백 질문지 (김지연): [research_5_scenario.md](./research_5_scenario.md)
 - 검토 메모: [review_checklist.md](./review_checklist.md) (팀 논의 후 반영)
 
 ---
