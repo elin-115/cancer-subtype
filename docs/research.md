@@ -25,6 +25,8 @@
 
 ## ② 유전자·경로 지식
 
+> 여은지님 자료: [research_2_gene_pathway.md](./research_2_gene_pathway.md) (검토 메모: [review_checklist.md](./review_checklist.md))
+
 ### 먼저 알아둘 용어
 
 | 용어 | 쉽게 말하면 |
@@ -255,7 +257,9 @@ train 데이터만 봤습니다. test는 보지 않았습니다.
 
 ## ⑤ 시장·사용자
 
-(작성 예정)
+- 시장성 조사 (여은지): [research_5_market.md](./research_5_market.md)
+- 사용자 조사 (여은지): [research_5_user.md](./research_5_user.md)
+- 검토 메모: [review_checklist.md](./review_checklist.md) (팀 논의 후 반영)
 
 ---
 
