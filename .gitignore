@@ -24,3 +24,7 @@ venv/
 
 # 노트북은 정리 후 올릴 예정
 01_baseline.ipynb
+
+# Gradio 데모 실행 시 생기는 임시 파일
+.gradio/
+flagged/
