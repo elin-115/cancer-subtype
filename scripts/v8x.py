@@ -10,7 +10,7 @@ from sklearn.metrics import f1_score
 from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier
 name, parts = sys.argv[1], set(sys.argv[2:])
-exec(open('/Users/mac/Desktop/cancer-subtype/scripts/blosum62.py').read())
+exec(open(__import__('os').path.join(__import__('os').path.dirname(__import__('os').path.abspath(__file__)),'blosum62.py')).read())
 DATA='/Users/mac/Desktop/cancer-subtype/data'; SEED=42
 HOT_N = 10 if 'N10' in parts else 5
 STAGE2_C = next((float(p[1:]) for p in parts if re.fullmatch(r'C[0-9.]+', p)), 0.005)   # 2단계 규제 (예: C0.05)
@@ -137,7 +137,7 @@ for f,(tr,va) in enumerate(StratifiedKFold(5,shuffle=True,random_state=SEED).spl
     print(f'  fold {f} {fs[-1]:.4f} {time.time()-t0:.0f}s',flush=True)
 cv=f1_score(y,oof,average='macro'); per=dict(zip(CL,np.round(f1_score(y,oof,average=None),3).tolist()))
 print(f'RESULT {name} CV {cv:.4f}',flush=True)
-D='/private/tmp/claude-501/-Users-mac--claude-spares-spare-HWdz2j/a1c9e8a5-d093-4d1e-ab2c-e0fa4d5ee248/scratchpad/v8'
+import os; D=os.path.dirname(os.path.abspath(__file__))   # 결과 json·oof는 스크립트 폴더에
 np.save(f'{D}/oof_{name}.npy',oof); json.dump(dict(name=name,cv=cv,folds=fs,per=per),open(f'{D}/res_{name}.json','w'))
 if 'SUBMIT' in parts:
     pairs,s1,s2=fit_all(np.arange(N)); te=np.arange(len(V_test))
