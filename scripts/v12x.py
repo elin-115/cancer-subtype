@@ -2,6 +2,7 @@
 
 옵션 (인자로 여러 개):
   SIG     원인별 흔적 묶음 (치환쌍을 CpG·자외선·담배·APOBEC 4묶음으로 합친 비율·개수)
+  MSI     복구 고장(MSI) 흔적: 반복 서열 표적 유전자 8개의 frameshift 0/1·개수, 침묵 변이 뺀 frameshift 비율
   TWO     두 번 맞은 유전자 (한 칸에 서로 다른 변이 2개 이상) 0/1, fold 안 10명 이상
   SUBMIT  전체 train 학습 후 output/submission_<이름>.csv 저장 (형제 라벨 없음)
 
@@ -58,10 +59,12 @@ AA = list('ACDEFGHIKLMNPQRSTVWY') + ['*']; AI = {a: i for i, a in enumerate(AA)}
 MS = re.compile(r'^([A-Z])(\d+)([A-Z*])$')
 # 원인별 흔적: 그 원인의 대표 염기 변화로 생기는 아미노산 변화 (Alexandrov 시그니처 기반 근사)
 SIGS = {'cpg': ['RC', 'RH', 'RW', 'RQ', 'R*'], 'uv': ['SF', 'PL', 'PS'], 'tobacco': ['GV', 'GC', 'DY', 'E*'], 'apobec': ['EK', 'EQ']}
+# MSI 표적 유전자: 반복 서열이 있어 복구 고장 시 frameshift가 잘 생기는 유전자 (암종 구분 없는 목록)
+MSI_G = ['ACVR2A', 'BAX', 'CASP5', 'JAK1', 'PRDM2', 'TCF7L2', 'TGFBR2', 'PTEN']; MSI_J = {g: k for k, g in enumerate(MSI_G)}
 SIG_IX = {k: [AI[p[0]] * 21 + AI[p[1]] for p in v] for k, v in SIGS.items()}
 
 def featurize(V):
-    n = len(V); Cm = np.zeros((n, 443), np.float32); hot, words, two = [], [], []
+    n = len(V); Cm = np.zeros((n, 443), np.float32); hot, words, two = [], [], []; MF = np.zeros((n, len(MSI_G)), np.float32)
     for i, row in enumerate(V):
         h, w, tw = [], [], []
         for j in np.flatnonzero(row != 'WT'):
@@ -70,7 +73,9 @@ def featurize(V):
             for t in toks:
                 m = MS.match(t)
                 if m and m.group(1) in AI and m.group(3) in AI: Cm[i, AI[m.group(1)] * 21 + AI[m.group(3)]] += 1
-                elif 'fs' in t: Cm[i, 441] += 1
+                elif 'fs' in t:
+                    Cm[i, 441] += 1
+                    if g in MSI_J: MF[i, MSI_J[g]] = 1
                 else: Cm[i, 442] += 1
                 w.append(f'{g}_{t}'); nums = re.findall(r'\d+', t)
                 if nums: h.append(f'{g}_{nums[0]}'); w.append(f'{g}@{nums[0]}')
@@ -79,7 +84,9 @@ def featurize(V):
     SUB = np.hstack([Cm / np.maximum(tot, 1), np.log1p(Cm)]).astype(np.float32)
     S4 = np.stack([Cm[:, ix].sum(1) for ix in SIG_IX.values()], 1)
     SIGF = np.hstack([S4 / np.maximum(tot, 1), np.log1p(S4)]).astype(np.float32)
-    return dict(BIN=BIN, NMUT=np.asarray(BIN.sum(1)).ravel(), HOT=hot, WORDS=words, SUB=SUB, SIG=SIGF, TWO=two)
+    silent = Cm[:, [k * 21 + k for k in range(20)]].sum(1, keepdims=True); nons = np.maximum(tot - silent, 1)
+    MSIF = np.hstack([MF, MF.sum(1, keepdims=True), Cm[:, 441:442] / nons, np.log1p(Cm[:, 441:442])]).astype(np.float32)
+    return dict(MSI=MSIF, BIN=BIN, NMUT=np.asarray(BIN.sum(1)).ravel(), HOT=hot, WORDS=words, SUB=SUB, SIG=SIGF, TWO=two)
 TR, TE = featurize(V), featurize(Vt)
 KEY = pd.util.hash_pandas_object(pd.DataFrame(V_raw), index=False).values.astype(np.int64)
 GRP = KEY.copy(); z = np.flatnonzero(TR['NMUT'] == 0); GRP[z] = -(z + 1)
@@ -123,6 +130,7 @@ class Model:
     def _Xx(self, S, ix):
         parts = [S['BIN'][ix], sp.csr_matrix(S['NMUT'][ix][:, None].astype(np.float32)), self.hot.transform(sub(S['HOT'], ix)), sp.csr_matrix(S['SUB'][ix])]
         if 'SIG' in OPTS: parts.append(sp.csr_matrix(S['SIG'][ix]))
+        if 'MSI' in OPTS: parts.append(sp.csr_matrix(S['MSI'][ix]))
         if 'TWO' in OPTS: parts.append(self.two.transform(sub(S['TWO'], ix)))
         return sp.hstack(parts, format='csr').astype(np.float32)
     def _Xl(self, S, ix): return self.tf.transform(self.cv.transform(sub(S['WORDS'], ix)))
