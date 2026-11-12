@@ -4,6 +4,10 @@
   SIG     원인별 흔적 묶음 (치환쌍을 CpG·자외선·담배·APOBEC 4묶음으로 합친 비율·개수)
   MSI     복구 고장(MSI) 흔적: 반복 서열 표적 유전자 8개의 frameshift 0/1·개수, 침묵 변이 뺀 frameshift 비율
   TWO     두 번 맞은 유전자 (한 칸에 서로 다른 변이 2개 이상) 0/1, fold 안 10명 이상
+  PAIRW   유전자 짝 단어: 자주 바뀌는 유전자 100개끼리 'A+B' 단어를 TF-IDF에 추가 (텍스트 bigram)
+  LSA     TF-IDF를 SVD로 100개 주제로 압축해 XGB에 추가 (토픽 모델)
+  LGBM    XGB 대신 LightGBM / LGBM3: XGB·LR·LGBM 1:1:1
+  KNN     TF-IDF 코사인 최근접 환자 15명 투표를 0.2 비중으로 섞기
   SUBMIT  전체 train 학습 후 output/submission_<이름>.csv 저장 (형제 라벨 없음)
 
 사용: python scripts/v12x.py <이름> [SIG] [TWO] [SUBMIT]
@@ -18,6 +22,9 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import f1_score
 from sklearn.utils.class_weight import compute_sample_weight
 from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+from sklearn.decomposition import TruncatedSVD
+from sklearn.neighbors import KNeighborsClassifier
 import warnings; warnings.filterwarnings('ignore')
 
 NAME, OPTS = sys.argv[1], set(sys.argv[2:])
@@ -88,6 +95,11 @@ def featurize(V):
     MSIF = np.hstack([MF, MF.sum(1, keepdims=True), Cm[:, 441:442] / nons, np.log1p(Cm[:, 441:442])]).astype(np.float32)
     return dict(MSI=MSIF, BIN=BIN, NMUT=np.asarray(BIN.sum(1)).ravel(), HOT=hot, WORDS=words, SUB=SUB, SIG=SIGF, TWO=two)
 TR, TE = featurize(V), featurize(Vt)
+if 'PAIRW' in OPTS:   # 라벨 안 씀, train 변이 빈도로만 고름
+    TOPG = set(G[np.argsort(-np.asarray(TR['BIN'].sum(0)).ravel())[:100]])
+    for S_ in (TR, TE):
+        for w in S_['WORDS']:
+            gs = sorted({t for t in w if t in TOPG}); w += [f'{a}+{b}' for k, a in enumerate(gs) for b in gs[k + 1:]]
 KEY = pd.util.hash_pandas_object(pd.DataFrame(V_raw), index=False).values.astype(np.int64)
 GRP = KEY.copy(); z = np.flatnonzero(TR['NMUT'] == 0); GRP[z] = -(z + 1)
 def identity(d): return d
@@ -118,10 +130,15 @@ class Model:
         self.pairs = pairs
         self.hot = CountVectorizer(analyzer=identity, min_df=HOT_N, binary=True, lowercase=False).fit(sub(TR['HOT'], ix))
         if 'TWO' in OPTS: self.two = CountVectorizer(analyzer=identity, min_df=10, binary=True, lowercase=False).fit(sub(TR['TWO'], ix))
-        self.xgb = XGBClassifier(**XGB_PARAMS).fit(self._Xx(TR, ix), lab, sample_weight=compute_sample_weight('balanced', lab))
         self.cv = CountVectorizer(analyzer=identity, min_df=2, binary=True, lowercase=False).fit(sub(TR['WORDS'], ix))
         self.tf = TfidfTransformer(sublinear_tf=True).fit(self.cv.transform(sub(TR['WORDS'], ix)))
-        self.lr = LogisticRegression(C=LR_C, class_weight='balanced', max_iter=3000).fit(self._Xl(TR, ix), lab)
+        Xl = self._Xl(TR, ix); sw = compute_sample_weight('balanced', lab)
+        if 'LSA' in OPTS: self.svd = TruncatedSVD(100, random_state=SEED).fit(Xl)
+        Xx = self._Xx(TR, ix); self.ms = []
+        if 'LGBM' not in OPTS: self.ms.append(XGBClassifier(**XGB_PARAMS).fit(Xx, lab, sample_weight=sw))
+        if 'LGBM' in OPTS or 'LGBM3' in OPTS: self.ms.append(LGBMClassifier(n_estimators=300, learning_rate=0.05, num_leaves=31, colsample_bytree=0.3, subsample=0.8, subsample_freq=1, random_state=SEED, verbose=-1, n_jobs=-1).fit(Xx, lab, sample_weight=sw))
+        self.lr = LogisticRegression(C=LR_C, class_weight='balanced', max_iter=3000).fit(Xl, lab)
+        if 'KNN' in OPTS: self.knn = KNeighborsClassifier(15, metric='cosine', algorithm='brute', weights='distance').fit(Xl, lab)
         self.gmask = np.flatnonzero(np.asarray(TR['BIN'][ix].sum(0)).ravel() >= 5); self.s2 = {}
         for umb, spec in pairs.items():
             m = np.isin(lab, [umb, spec])
@@ -132,11 +149,17 @@ class Model:
         if 'SIG' in OPTS: parts.append(sp.csr_matrix(S['SIG'][ix]))
         if 'MSI' in OPTS: parts.append(sp.csr_matrix(S['MSI'][ix]))
         if 'TWO' in OPTS: parts.append(self.two.transform(sub(S['TWO'], ix)))
+        if 'LSA' in OPTS: parts.append(sp.csr_matrix(self.svd.transform(self._Xl(S, ix)).astype(np.float32)))
         return sp.hstack(parts, format='csr').astype(np.float32)
     def _Xl(self, S, ix): return self.tf.transform(self.cv.transform(sub(S['WORDS'], ix)))
     def _X2(self, S, ix): return sp.hstack([S['BIN'][ix][:, self.gmask], sp.csr_matrix(np.log1p(S['NMUT'][ix])[:, None])], format='csr')
     def predict(self, S, ix):
-        P = W_XGB * self.xgb.predict_proba(self._Xx(S, ix)) + (1 - W_XGB) * self.lr.predict_proba(self._Xl(S, ix)); Pm = P.copy()
+        Xx, Xl = self._Xx(S, ix), self._Xl(S, ix)
+        Ptree = [m.predict_proba(Xx) for m in self.ms]; Plr = self.lr.predict_proba(Xl)
+        P = (sum(Ptree) + Plr) / 3 if len(Ptree) == 2 else W_XGB * Ptree[0] + (1 - W_XGB) * Plr
+        if 'KNN' in OPTS:
+            Pk = np.zeros_like(P); Pk[:, self.knn.classes_] = self.knn.predict_proba(Xl); P = 0.8 * P + 0.2 * Pk
+        Pm = P.copy()
         for umb, spec in self.s2: Pm[:, umb] = P[:, umb] + P[:, spec]; Pm[:, spec] = -1
         pred = Pm.argmax(1)
         for (umb, spec), mdl in self.s2.items():
