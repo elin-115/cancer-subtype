@@ -12,6 +12,7 @@
   STACK   5:5 고정 평균 대신, 학습 fold 안 3-fold로 만든 확률을 보고 아형별 비중을 배우는 로지스틱 회귀
   PSPEC   헷갈리는 쌍 전문가: v12 OOF 혼동에서 많이 틀린 쌍 5개(BRCA-OV, HNSC-STES, PCPG-PRAD, OV-SARC, LUAD-LUSC)마다
           두 아형만으로 학습한 XGB를 두고, 1·2등이 그 쌍이면 전문가가 다시 판정
+  SK      STACK 입력에 kNN(비슷한 환자 15명) 확률 추가 / SL: LightGBM 확률 추가 — 고정 비율로는 실패했지만 메타 모델이 아형별로 고르게 함
   SUBMIT  전체 train 학습 후 output/submission_<이름>.csv 저장 (형제 라벨 없음)
 
 사용: python scripts/v12x.py <이름> [SIG] [TWO] [SUBMIT]
@@ -149,7 +150,8 @@ class Model:
             for a, b in SPEC_PAIRS:
                 ia, ib = CL.index(a), CL.index(b); m = np.isin(lab, [ia, ib])
                 self.spec[(ia, ib)] = XGBClassifier(**{**XGB_PARAMS, 'n_estimators': 200}).fit(Xx[m], (lab[m] == ib).astype(int), sample_weight=compute_sample_weight('balanced', lab[m]))
-        if 'KNN' in OPTS: self.knn = KNeighborsClassifier(15, metric='cosine', algorithm='brute', weights='distance').fit(Xl, lab)
+        if 'SL' in OPTS: self.lgb = LGBMClassifier(n_estimators=300, learning_rate=0.05, num_leaves=31, colsample_bytree=0.3, subsample=0.8, subsample_freq=1, random_state=SEED, verbose=-1, n_jobs=-1).fit(Xx, lab, sample_weight=sw)
+        if 'KNN' in OPTS or 'SK' in OPTS: self.knn = KNeighborsClassifier(15, metric='cosine', algorithm='brute', weights='distance').fit(Xl, lab)
         self.gmask = np.flatnonzero(np.asarray(TR['BIN'][ix].sum(0)).ravel() >= 5); self.s2 = {}
         for umb, spec in pairs.items():
             m = np.isin(lab, [umb, spec])
@@ -167,7 +169,10 @@ class Model:
     def raw(self, S, ix):
         def full(m, X):
             P = np.zeros((len(ix), len(CL))); P[:, m.classes_] = m.predict_proba(X); return P
-        return full(self.ms[0], self._Xx(S, ix)), full(self.lr, self._Xl(S, ix))
+        Xx, Xl = self._Xx(S, ix), self._Xl(S, ix); out = [full(self.ms[0], Xx), full(self.lr, Xl)]
+        if 'SK' in OPTS: out.append(full(self.knn, Xl))
+        if 'SL' in OPTS: out.append(full(self.lgb, Xx))
+        return tuple(out)
     def predict(self, S, ix):
         Xx, Xl = self._Xx(S, ix), self._Xl(S, ix)
         Ptree = [m.predict_proba(Xx) for m in self.ms]; Plr = self.lr.predict_proba(Xl)
@@ -176,6 +181,8 @@ class Model:
             P = np.zeros_like(P); P[:, self.meta.classes_] = self.meta.predict_proba(np.hstack(self.raw(S, ix)))
         if 'KNN' in OPTS:
             Pk = np.zeros_like(P); Pk[:, self.knn.classes_] = self.knn.predict_proba(Xl); P = 0.8 * P + 0.2 * Pk
+        if getattr(self, 'w', None) is not None: P = P * self.w   # 판정 기준 조정 가중치 (BIAS)
+        self.lastP = P; self.lastQ = {k: mdl.predict_proba(self._X2(S, ix))[:, 1] for k, mdl in self.s2.items()}   # 판정 기준 조정 실험용 기록
         Pm = P.copy()
         for umb, spec in self.s2: Pm[:, umb] = P[:, umb] + P[:, spec]; Pm[:, spec] = -1
         pred = Pm.argmax(1)
@@ -192,20 +199,24 @@ class Model:
 def fit_model(ix):
     pairs = find_pairs(ix); k, l = clean(ix, pairs); M = Model().fit(k, l, pairs)
     if 'STACK' in OPTS:   # 학습 fold 안에서만 OOF 확률을 만들어 메타 모델 학습
-        Z = np.zeros((len(k), 2 * len(CL)))
+        nin = 2 + ('SK' in OPTS) + ('SL' in OPTS); Z = np.zeros((len(k), nin * len(CL)))
         for itr, iva in StratifiedKFold(3, shuffle=True, random_state=SEED).split(k, l):
             m_ = Model().fit(k[itr], l[itr], pairs); Z[iva] = np.hstack(m_.raw(TR, k[iva]))
         M.meta = LogisticRegression(C=1.0, class_weight='balanced', max_iter=3000).fit(Z, l)
     return M
 
-ALL = np.arange(N); pred = np.zeros(N, int); t0 = time.time(); fs = []
-for f, (tr, va) in enumerate(StratifiedKFold(5, shuffle=True, random_state=int(os.environ.get('CVSEED', SEED))).split(ALL, y), 1):
-    pred[va] = fit_model(tr).predict(TR, va); fs.append(f1_score(y[va], pred[va], average='macro'))
-print(f'{NAME} {sorted(OPTS)} | folds', ' '.join(f'{v:.4f}' for v in fs), f'| OOF {f1_score(y, pred, average="macro"):.4f} | {time.time() - t0:.0f}s', flush=True)
-np.save(f'{OUT_DIR}/oof_{NAME}.npy', pred)
+ALL = np.arange(N); pred = np.zeros(N, int); t0 = time.time(); fs = []; OP = np.zeros((N, len(CL))); OQ = {}
+for f, (tr, va) in enumerate([] if os.environ.get('SKIPCV') else StratifiedKFold(5, shuffle=True, random_state=int(os.environ.get('CVSEED', SEED))).split(ALL, y), 1):
+    M_ = fit_model(tr); pred[va] = M_.predict(TR, va); fs.append(f1_score(y[va], pred[va], average='macro')); OP[va] = M_.lastP
+    for k_, q_ in M_.lastQ.items(): OQ.setdefault(k_, np.zeros(N))[va] = q_
+if not os.environ.get('SKIPCV'): print(f'{NAME} {sorted(OPTS)} | folds', ' '.join(f'{v:.4f}' for v in fs), f'| OOF {f1_score(y, pred, average="macro"):.4f} | {time.time() - t0:.0f}s', flush=True)
+if not os.environ.get('SKIPCV'): np.save(f'{OUT_DIR}/oof_{NAME}.npy', pred); np.save(f'{OUT_DIR}/oofP_{NAME}.npy', OP); np.save(f'{OUT_DIR}/oofQ_{NAME}.npy', np.array([[a, b] for a, b in OQ]))
+for (a_, b_), q_ in OQ.items(): np.save(f'{OUT_DIR}/oofQ_{NAME}_{a_}_{b_}.npy', q_)
 
 if 'SUBMIT' in OPTS:
-    p = fit_model(ALL).predict(TE, np.arange(len(Vt)))
+    FM = fit_model(ALL)
+    if os.environ.get('BIAS'): FM.w = np.load(os.environ['BIAS']); print('BIAS 적용', os.environ['BIAS'])
+    p = FM.predict(TE, np.arange(len(Vt)))
     def save(pp, nm):
         s = submission.copy(); s['SUBCLASS'] = le.inverse_transform(pp); s.to_csv(f'{OUT_DIR}/{nm}', index=False, encoding='utf-8-sig')
         chk = pd.read_csv(f'{OUT_DIR}/{nm}'); assert len(chk) == len(test) and (chk['ID'] == test['ID']).all() and chk['SUBCLASS'].notna().all()
