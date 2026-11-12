@@ -8,6 +8,10 @@
   LSA     TF-IDF를 SVD로 100개 주제로 압축해 XGB에 추가 (토픽 모델)
   LGBM    XGB 대신 LightGBM / LGBM3: XGB·LR·LGBM 1:1:1
   KNN     TF-IDF 코사인 최근접 환자 15명 투표를 0.2 비중으로 섞기
+  VTYPE   유전자별 변이 성격 단어: TP53#trunc, TP53#mis, TP53#silent (유전자와 정확한 변이 사이의 중간 단위)
+  STACK   5:5 고정 평균 대신, 학습 fold 안 3-fold로 만든 확률을 보고 아형별 비중을 배우는 로지스틱 회귀
+  PSPEC   헷갈리는 쌍 전문가: v12 OOF 혼동에서 많이 틀린 쌍 5개(BRCA-OV, HNSC-STES, PCPG-PRAD, OV-SARC, LUAD-LUSC)마다
+          두 아형만으로 학습한 XGB를 두고, 1·2등이 그 쌍이면 전문가가 다시 판정
   SUBMIT  전체 train 학습 후 output/submission_<이름>.csv 저장 (형제 라벨 없음)
 
 사용: python scripts/v12x.py <이름> [SIG] [TWO] [SUBMIT]
@@ -85,6 +89,7 @@ def featurize(V):
                     if g in MSI_J: MF[i, MSI_J[g]] = 1
                 else: Cm[i, 442] += 1
                 w.append(f'{g}_{t}'); nums = re.findall(r'\d+', t)
+                if 'VTYPE' in OPTS: w.append(f'{g}#' + ('trunc' if ('*' in t or 'fs' in t) else 'silent' if (m and m.group(1) == m.group(3)) else 'mis'))
                 if nums: h.append(f'{g}_{nums[0]}'); w.append(f'{g}@{nums[0]}')
         hot.append(list(dict.fromkeys(h))); words.append(w); two.append(tw)
     BIN = sp.csr_matrix((V != 'WT').astype(np.float32)); tot = Cm.sum(1, keepdims=True)
@@ -123,6 +128,7 @@ def clean(ix, pairs):
         else: keep += rows; lab += [y[i] for i in rows]
     return np.array(keep), np.array(lab)
 
+SPEC_PAIRS = [('BRCA', 'OV'), ('HNSC', 'STES'), ('PCPG', 'PRAD'), ('OV', 'SARC'), ('LUAD', 'LUSC')]   # v12 OOF 혼동 상위 (겹치는 라벨 쌍 제외)
 XGB_PARAMS = dict(n_estimators=300, learning_rate=0.05, max_depth=6, subsample=0.8, colsample_bytree=0.3, tree_method='hist', n_jobs=-1, random_state=SEED)
 
 class Model:
@@ -138,6 +144,11 @@ class Model:
         if 'LGBM' not in OPTS: self.ms.append(XGBClassifier(**XGB_PARAMS).fit(Xx, lab, sample_weight=sw))
         if 'LGBM' in OPTS or 'LGBM3' in OPTS: self.ms.append(LGBMClassifier(n_estimators=300, learning_rate=0.05, num_leaves=31, colsample_bytree=0.3, subsample=0.8, subsample_freq=1, random_state=SEED, verbose=-1, n_jobs=-1).fit(Xx, lab, sample_weight=sw))
         self.lr = LogisticRegression(C=LR_C, class_weight='balanced', max_iter=3000).fit(Xl, lab)
+        if 'PSPEC' in OPTS:
+            self.spec = {}
+            for a, b in SPEC_PAIRS:
+                ia, ib = CL.index(a), CL.index(b); m = np.isin(lab, [ia, ib])
+                self.spec[(ia, ib)] = XGBClassifier(**{**XGB_PARAMS, 'n_estimators': 200}).fit(Xx[m], (lab[m] == ib).astype(int), sample_weight=compute_sample_weight('balanced', lab[m]))
         if 'KNN' in OPTS: self.knn = KNeighborsClassifier(15, metric='cosine', algorithm='brute', weights='distance').fit(Xl, lab)
         self.gmask = np.flatnonzero(np.asarray(TR['BIN'][ix].sum(0)).ravel() >= 5); self.s2 = {}
         for umb, spec in pairs.items():
@@ -153,30 +164,63 @@ class Model:
         return sp.hstack(parts, format='csr').astype(np.float32)
     def _Xl(self, S, ix): return self.tf.transform(self.cv.transform(sub(S['WORDS'], ix)))
     def _X2(self, S, ix): return sp.hstack([S['BIN'][ix][:, self.gmask], sp.csr_matrix(np.log1p(S['NMUT'][ix])[:, None])], format='csr')
+    def raw(self, S, ix):
+        def full(m, X):
+            P = np.zeros((len(ix), len(CL))); P[:, m.classes_] = m.predict_proba(X); return P
+        return full(self.ms[0], self._Xx(S, ix)), full(self.lr, self._Xl(S, ix))
     def predict(self, S, ix):
         Xx, Xl = self._Xx(S, ix), self._Xl(S, ix)
         Ptree = [m.predict_proba(Xx) for m in self.ms]; Plr = self.lr.predict_proba(Xl)
         P = (sum(Ptree) + Plr) / 3 if len(Ptree) == 2 else W_XGB * Ptree[0] + (1 - W_XGB) * Plr
+        if 'STACK' in OPTS and hasattr(self, 'meta'):
+            P = np.zeros_like(P); P[:, self.meta.classes_] = self.meta.predict_proba(np.hstack(self.raw(S, ix)))
         if 'KNN' in OPTS:
             Pk = np.zeros_like(P); Pk[:, self.knn.classes_] = self.knn.predict_proba(Xl); P = 0.8 * P + 0.2 * Pk
         Pm = P.copy()
         for umb, spec in self.s2: Pm[:, umb] = P[:, umb] + P[:, spec]; Pm[:, spec] = -1
         pred = Pm.argmax(1)
+        if 'PSPEC' in OPTS:
+            top2 = np.argsort(-Pm, 1)[:, :2]
+            for (ia, ib), mdl in self.spec.items():
+                m = ((top2[:, 0] == ia) & (top2[:, 1] == ib)) | ((top2[:, 0] == ib) & (top2[:, 1] == ia))
+                if m.any(): pred[m] = np.where(mdl.predict_proba(Xx[m])[:, 1] >= 0.5, ib, ia)
         for (umb, spec), mdl in self.s2.items():
             m = pred == umb
             if m.any(): pred[m] = np.where(mdl.predict_proba(self._X2(S, ix[m]))[:, 1] >= 0.5, spec, umb)
         return pred
 
 def fit_model(ix):
-    pairs = find_pairs(ix); k, l = clean(ix, pairs); return Model().fit(k, l, pairs)
+    pairs = find_pairs(ix); k, l = clean(ix, pairs); M = Model().fit(k, l, pairs)
+    if 'STACK' in OPTS:   # 학습 fold 안에서만 OOF 확률을 만들어 메타 모델 학습
+        Z = np.zeros((len(k), 2 * len(CL)))
+        for itr, iva in StratifiedKFold(3, shuffle=True, random_state=SEED).split(k, l):
+            m_ = Model().fit(k[itr], l[itr], pairs); Z[iva] = np.hstack(m_.raw(TR, k[iva]))
+        M.meta = LogisticRegression(C=1.0, class_weight='balanced', max_iter=3000).fit(Z, l)
+    return M
 
 ALL = np.arange(N); pred = np.zeros(N, int); t0 = time.time(); fs = []
-for f, (tr, va) in enumerate(StratifiedKFold(5, shuffle=True, random_state=SEED).split(ALL, y), 1):
+for f, (tr, va) in enumerate(StratifiedKFold(5, shuffle=True, random_state=int(os.environ.get('CVSEED', SEED))).split(ALL, y), 1):
     pred[va] = fit_model(tr).predict(TR, va); fs.append(f1_score(y[va], pred[va], average='macro'))
 print(f'{NAME} {sorted(OPTS)} | folds', ' '.join(f'{v:.4f}' for v in fs), f'| OOF {f1_score(y, pred, average="macro"):.4f} | {time.time() - t0:.0f}s', flush=True)
 np.save(f'{OUT_DIR}/oof_{NAME}.npy', pred)
 
 if 'SUBMIT' in OPTS:
     p = fit_model(ALL).predict(TE, np.arange(len(Vt)))
-    s = submission.copy(); s['SUBCLASS'] = le.inverse_transform(p); s.to_csv(f'{OUT_DIR}/submission_{NAME}.csv', index=False, encoding='utf-8-sig')
-    print('saved', f'{OUT_DIR}/submission_{NAME}.csv')
+    def save(pp, nm):
+        s = submission.copy(); s['SUBCLASS'] = le.inverse_transform(pp); s.to_csv(f'{OUT_DIR}/{nm}', index=False, encoding='utf-8-sig')
+        chk = pd.read_csv(f'{OUT_DIR}/{nm}'); assert len(chk) == len(test) and (chk['ID'] == test['ID']).all() and chk['SUBCLASS'].notna().all()
+        print('saved', nm, '| 예측 아형 수', chk['SUBCLASS'].nunique())
+    save(p, f'submission_{NAME}.csv')
+    # 형제 라벨 교정 (도엽 v12 노트북과 같은 규칙): test 변이가 train 환자와 완전히 같으면 KIRC<->KIPAN, LGG<->GBMLGG
+    KEY_t = pd.util.hash_pandas_object(pd.DataFrame(Vt_raw), index=False).values.astype(np.int64)
+    pairs = find_pairs(ALL); smap = {}
+    for u, s_ in pairs.items(): smap[u] = s_; smap[s_] = u
+    labs = defaultdict(set)
+    for i in ALL:
+        if TR['NMUT'][i] > 0: labs[KEY[i]].add(y[i])
+    ps = p.copy()
+    for j, k in enumerate(KEY_t):
+        s_ = labs.get(k)
+        if s_ and len(s_) == 1 and next(iter(s_)) in smap: ps[j] = smap[next(iter(s_))]
+    print('형제 교정으로 바뀐 행', int((ps != p).sum()))
+    save(ps, f'submission_{NAME}_sibling.csv')
