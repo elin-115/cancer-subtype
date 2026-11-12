@@ -131,6 +131,11 @@ if 'GRID' in parts:   # fold마다 1단계는 한 번만 학습하고 2단계 �
         pf=f1_score(y,O[nm_],average=None)
         print(f'{nm_:14s} CV {f1_score(y,O[nm_],average="macro"):.4f}  folds {np.round(FS[nm_],4).tolist()}  KIPAN/KIRC/GBMLGG/LGG {np.round(pf[pi],3).tolist()}',flush=True)
     sys.exit()
+if 'EXPORT' in parts:   # 데모용: 전체 train으로 학습해 한 파일에 저장 (교차검증 생략)
+    import joblib; pairs,s1,s2=fit_all(np.arange(N))
+    art=dict(gene_cols=genes,classes=CL,hot_vocab=s1.hot.vocabulary_,pair_idx=s1.pk,stage1=s1.m,
+             pairs=pairs,stage2=s2.models,gmask=s2.gmask,parts=sorted(parts))
+    out=f'/Users/mac/Desktop/cancer-subtype/output/model_{name}.pkl'; joblib.dump(art,out); print('saved',out); sys.exit()
 oof=np.zeros(N,int); fs=[]
 for f,(tr,va) in enumerate(StratifiedKFold(5,shuffle=True,random_state=SEED).split(np.arange(N),y),1):
     pairs,s1,s2=fit_all(tr); oof[va]=s2.predict(s1.proba(TR,va),TR,va); fs.append(f1_score(y[va],oof[va],average='macro'))
