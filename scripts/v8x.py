@@ -1,6 +1,6 @@
 # 도엽 v8A(07_v8_service_model.ipynb) 위에 우리 후보 피처를 하나씩 얹어 같은 일반 5-Fold로 비교
 # 사용: python v8x.py 이름 [H] [D] [S] [N10] [WP0.7] [SUBMIT]
-import sys, re, time, json, numpy as np, pandas as pd, scipy.sparse as sp
+import os, sys, re, time, json, numpy as np, pandas as pd, scipy.sparse as sp
 from collections import Counter, defaultdict
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -15,6 +15,8 @@ DATA='/Users/mac/Desktop/cancer-subtype/data'; SEED=42
 HOT_N = 10 if 'N10' in parts else 5
 STAGE2_C = next((float(p[1:]) for p in parts if re.fullmatch(r'C[0-9.]+', p)), 0.005)   # 2단계 규제 (예: C0.05)
 S2HOT = 'S2HOT' in parts   # 2단계에 핫스팟 0/1 추가
+TFC = next((float(p[3:]) for p in parts if p.startswith('TFC')), None)   # 예: TFC3 → TF-IDF 로지스틱 회귀를 섞음
+TFW = next((float(p[3:]) for p in parts if p.startswith('TFW')), 0.7)    # 섞는 비율 (로지스틱 쪽)
 WPOW = next((float(p[2:]) for p in parts if p.startswith('WP')), 1.0)
 SIL = 'S' in parts
 train=pd.read_csv(f'{DATA}/train.csv',dtype=str); test=pd.read_csv(f'{DATA}/test.csv',dtype=str)
@@ -28,11 +30,14 @@ def blos(t):
     if not m or m.group(1)==m.group(3): return None
     return BLOSUM62.get((m.group(1),m.group(3)))
 def parse_rows(V):
-    hot=[]; B=np.zeros(V.shape,np.float32); T=np.zeros(V.shape,np.float32); H=np.zeros(V.shape,np.float32)
+    hot=[]; doc=[]; B=np.zeros(V.shape,np.float32); T=np.zeros(V.shape,np.float32); H=np.zeros(V.shape,np.float32)
     for i,row in enumerate(V):
-        h=[]
+        h=[]; d=[]
         for j in np.flatnonzero(row!='WT'):
-            toks=row[j].split()
+            toks=row[j].split(); d.append(G[j])
+            for t in toks:   # 텍스트 마이닝용 단어: 유전자, 유전자_위치, 유전자_변이표기
+                d.append(f'{G[j]}_{t}'); nums=re.findall(r'\d+',t)
+                if nums: d.append(f'{G[j]}@{nums[0]}')
             keep=[m for m in toks if not (SIL and silent(m))]
             B[i,j]=1.0 if (keep or not SIL) else 0.0
             if any(('*' in t) or ('fs' in t) for t in toks): T[i,j]=1
@@ -40,7 +45,7 @@ def parse_rows(V):
             for m in keep:
                 nums=re.findall(r'\d+',m)
                 if nums: h.append(f'{G[j]}_{nums[0]}')
-        hot.append(list(dict.fromkeys(h)))
+        hot.append(list(dict.fromkeys(h))); doc.append(d)
     NM=(V!='WT').sum(1).astype(np.float32)   # n_mut은 항상 전체 변이 수
     # 치환 스펙트럼: missense의 원래/바뀐 아미노산 비율(20+20) + 자주 나오는 치환쌍 비율, silent의 아미노산 비율(20). 행 안에서만 계산
     AA='ACDEFGHIKLMNPQRSTVWY'; ai={a:k for k,a in enumerate(AA)}
@@ -56,7 +61,7 @@ def parse_rows(V):
     nmis=FR.sum(1,keepdims=True); nsil=SL.sum(1,keepdims=True)
     SPEC=np.hstack([FR/(nmis+1),TO/(nmis+1),SL/(nsil+1)])   # +1: 변이가 적은 환자는 0 쪽으로 줄임
     PAIR=PR/(nmis+1)
-    return dict(BIN=sp.csr_matrix(B),NMUT=NM,HOT=hot,T=sp.csr_matrix(T),H=sp.csr_matrix(H),SPEC=SPEC,PAIR=PAIR)
+    return dict(DOC=doc,BIN=sp.csr_matrix(B),NMUT=NM,HOT=hot,T=sp.csr_matrix(T),H=sp.csr_matrix(H),SPEC=SPEC,PAIR=PAIR)
 t0=time.time(); TR,TE=parse_rows(V),parse_rows(V_test); print(name,sorted(parts),'parse',f'{time.time()-t0:.0f}s',flush=True)
 GRP=pd.util.hash_pandas_object(pd.DataFrame(V),index=False).values.astype(np.int64)
 z=np.flatnonzero(TR['NMUT']==0); GRP[z]=-(z+1)
@@ -116,8 +121,34 @@ class Stage2:
             m=pred==umb
             if m.any(): pred[m]=np.where(mdl.predict_proba(self._X(S,ix[m]))[:,1]>=0.5,spec,umb)
         return pred
+class Blend:   # XGB 확률과 TF-IDF 로지스틱 회귀 확률을 섞음 (TFC 옵션이 없으면 XGB 그대로)
+    def __init__(self,s1,k,l):
+        self.s1=s1; self.lr=None
+        if TFC is not None:
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            self.tf=TfidfVectorizer(analyzer=ident,min_df=2,sublinear_tf=True,lowercase=False).fit(sub(TR['DOC'],k))
+            self.lr=LogisticRegression(C=TFC,class_weight='balanced',max_iter=3000).fit(self.tf.transform(sub(TR['DOC'],k)),l)
+    def proba(self,S,ix):
+        P=self.s1.proba(S,ix)
+        return P if self.lr is None else (1-TFW)*P+TFW*self.lr.predict_proba(self.tf.transform(sub(S['DOC'],ix)))
 def fit_all(ix):
-    pairs=find_pairs(ix); k,l=clean(ix,pairs); s1=Stage1().fit(k,l); return pairs,s1,Stage2().fit(k,l,pairs,s1.hot)
+    pairs=find_pairs(ix); k,l=clean(ix,pairs); s1=Stage1().fit(k,l); return pairs,Blend(s1,k,l),Stage2().fit(k,l,pairs,s1.hot)
+if 'TFGRID' in parts:   # 1위 팀 힌트: 변이 목록을 텍스트로 보고 TF-IDF + 로지스틱 회귀, XGB 확률과 섞기 (fold 안에서만 학습)
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    WS=[float(x) for x in os.environ.get("WS","0,0.2,0.35,0.5,0.7").split(",")]; CS=[float(x) for x in os.environ.get("CS","0.3,1,3").split(",")]
+    O={(c,w):np.zeros(N,int) for c in CS for w in WS}; FS={k:[] for k in O}
+    for f,(tr,va) in enumerate(StratifiedKFold(5,shuffle=True,random_state=SEED).split(np.arange(N),y),1):
+        pairs=find_pairs(tr); k,l=clean(tr,pairs); s1=Stage1().fit(k,l); s2=Stage2().fit(k,l,pairs,s1.hot); Px=s1.proba(TR,va)
+        tf=TfidfVectorizer(analyzer=ident,min_df=2,sublinear_tf=True,lowercase=False).fit(sub(TR['DOC'],k))
+        Xk,Xv=tf.transform(sub(TR['DOC'],k)),tf.transform(sub(TR['DOC'],va))
+        for c in CS:
+            Pl=LogisticRegression(C=c,class_weight='balanced',max_iter=3000).fit(Xk,l).predict_proba(Xv)
+            for w in WS:
+                O[(c,w)][va]=s2.predict((1-w)*Px+w*Pl,TR,va); FS[(c,w)].append(f1_score(y[va],O[(c,w)][va],average='macro'))
+        print(f'  fold {f} {time.time()-t0:.0f}s',flush=True)
+    for (c,w) in O:
+        print(f'C{c} w{w}  CV {f1_score(y,O[(c,w)],average="macro"):.4f}  folds {np.round(FS[(c,w)],4).tolist()}',flush=True)
+    sys.exit()
 if 'GRID' in parts:   # fold마다 1단계는 한 번만 학습하고 2단계 설정만 바꿔 비교 (1단계 흔들림 제거)
     CFG=[('base C0.005',0.005,False),('C0.002',0.002,False),('C0.001',0.001,False),('C0.0003',0.0003,False),('핫스팟 C0.002',0.002,True),('핫스팟 C0.001',0.001,True)]
     O={c[0]:np.zeros(N,int) for c in CFG}; FS={c[0]:[] for c in CFG}
@@ -132,7 +163,7 @@ if 'GRID' in parts:   # fold마다 1단계는 한 번만 학습하고 2단계 �
         print(f'{nm_:14s} CV {f1_score(y,O[nm_],average="macro"):.4f}  folds {np.round(FS[nm_],4).tolist()}  KIPAN/KIRC/GBMLGG/LGG {np.round(pf[pi],3).tolist()}',flush=True)
     sys.exit()
 if 'EXPORT' in parts:   # 데모용: 전체 train으로 학습해 한 파일에 저장 (교차검증 생략)
-    import joblib; pairs,s1,s2=fit_all(np.arange(N))
+    import joblib; pairs,b,s2=fit_all(np.arange(N)); s1=b.s1   # 데모는 XGB만 (TF-IDF 섞기는 아직 데모에 없음)
     art=dict(gene_cols=genes,classes=CL,hot_vocab=s1.hot.vocabulary_,pair_idx=s1.pk,stage1=s1.m,
              pairs=pairs,stage2=s2.models,gmask=s2.gmask,parts=sorted(parts))
     out=f'/Users/mac/Desktop/cancer-subtype/output/model_{name}.pkl'; joblib.dump(art,out); print('saved',out); sys.exit()
