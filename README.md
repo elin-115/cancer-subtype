@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  📅 <a href="./docs/04_프로젝트_타임라인.md">프로젝트 타임라인</a>
+  📅 <a href="https://claude.ai/artifact/AgBcvrD6LNLYXmctS7N12u">프로젝트 타임라인</a> <sub>(<a href="./docs/04_프로젝트_타임라인.md">문서 버전</a>)</sub>
 </p>
 
 ## 문제
