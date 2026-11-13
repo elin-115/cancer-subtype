@@ -221,13 +221,19 @@ if 'SUBMIT' in OPTS:
         Ps, Qs = [FM.lastP], [FM.lastQ]
         for sd in [int(v) for v in os.environ['SEEDS'].split(',') if int(v) != SEED]:
             SEED = sd; XGB_PARAMS['random_state'] = sd
-            F2 = fit_model(ALL); F2.predict(TE, np.arange(len(Vt))); Ps.append(F2.lastP); Qs.append(F2.lastQ); print('seed', sd, 'done', flush=True)
+            F2 = fit_model(ALL); F2.predict(TE, np.arange(len(Vt))); EXPORTED = globals().get('EXPORTED', []) + [F2]; Ps.append(F2.lastP); Qs.append(F2.lastQ); print('seed', sd, 'done', flush=True)
         P = np.mean(Ps, 0); Pm = P.copy()
         for umb, spec in FM.s2: Pm[:, umb] = P[:, umb] + P[:, spec]; Pm[:, spec] = -1
         p0 = p; p = Pm.argmax(1)
         for k_ in FM.s2:
             q = np.mean([Q[k_] for Q in Qs], 0); m = p == k_[0]; p[m] = np.where(q[m] >= 0.5, k_[1], k_[0])
         print('시드 평균 vs 시드 42 일치', f'{(p == p0).mean():.1%}')
+    if 'EXPORT' in OPTS:   # 데모용: 시드별 모델의 학습된 부품만 저장 (sklearn·xgboost 객체와 단어 사전, 함수는 저장 안 함)
+        import joblib
+        Ms = [FM] + ([F2_ for F2_ in EXPORTED] if 'EXPORTED' in globals() else [])
+        def part(M): return dict(hot_vocab=M.hot.vocabulary_, word_vocab=M.cv.vocabulary_, idf=M.tf.idf_, xgb=M.ms[0], lr=M.lr, meta=M.meta, s2=M.s2, gmask=M.gmask)
+        art = dict(gene_cols=genes, classes=CL, hot_cnt=dict(HOT_CNT), models=[part(M) for M in Ms], seeds=os.environ.get('SEEDS', str(SEED)))
+        joblib.dump(art, f'{OUT_DIR}/model_{NAME}.pkl'); print('saved', f'{OUT_DIR}/model_{NAME}.pkl', '| 모델 수', len(Ms))
     def save(pp, nm):
         s = submission.copy(); s['SUBCLASS'] = le.inverse_transform(pp); s.to_csv(f'{OUT_DIR}/{nm}', index=False, encoding='utf-8-sig')
         chk = pd.read_csv(f'{OUT_DIR}/{nm}'); assert len(chk) == len(test) and (chk['ID'] == test['ID']).all() and chk['SUBCLASS'].notna().all()
