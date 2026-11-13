@@ -217,6 +217,17 @@ if 'SUBMIT' in OPTS:
     FM = fit_model(ALL)
     if os.environ.get('BIAS'): FM.w = np.load(os.environ['BIAS']); print('BIAS 적용', os.environ['BIAS'])
     p = FM.predict(TE, np.arange(len(Vt)))
+    if os.environ.get('SEEDS'):   # 시드 평균: 시드마다 전체 학습 후 test 확률(1단계·2단계)을 평균 내 판정
+        Ps, Qs = [FM.lastP], [FM.lastQ]
+        for sd in [int(v) for v in os.environ['SEEDS'].split(',') if int(v) != SEED]:
+            SEED = sd; XGB_PARAMS['random_state'] = sd
+            F2 = fit_model(ALL); F2.predict(TE, np.arange(len(Vt))); Ps.append(F2.lastP); Qs.append(F2.lastQ); print('seed', sd, 'done', flush=True)
+        P = np.mean(Ps, 0); Pm = P.copy()
+        for umb, spec in FM.s2: Pm[:, umb] = P[:, umb] + P[:, spec]; Pm[:, spec] = -1
+        p0 = p; p = Pm.argmax(1)
+        for k_ in FM.s2:
+            q = np.mean([Q[k_] for Q in Qs], 0); m = p == k_[0]; p[m] = np.where(q[m] >= 0.5, k_[1], k_[0])
+        print('시드 평균 vs 시드 42 일치', f'{(p == p0).mean():.1%}')
     def save(pp, nm):
         s = submission.copy(); s['SUBCLASS'] = le.inverse_transform(pp); s.to_csv(f'{OUT_DIR}/{nm}', index=False, encoding='utf-8-sig')
         chk = pd.read_csv(f'{OUT_DIR}/{nm}'); assert len(chk) == len(test) and (chk['ID'] == test['ID']).all() and chk['SUBCLASS'].notna().all()
